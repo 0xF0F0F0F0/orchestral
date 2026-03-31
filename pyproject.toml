@@ -1,0 +1,11 @@
+[project]
+name = "orchestral"
+version = "0.1.0"
+description = "AI agent orchestra - observe and manage multi-agent setups across repositories"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.50.0",
+]
+
+[project.scripts]
+orchestral = "src.app:main"
