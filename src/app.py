@@ -26,7 +26,6 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import (
-    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -46,7 +45,7 @@ import subprocess as _subprocess
 
 
 class SpawnDialog(ModalScreen[Optional[dict]]):
-    """Modal to configure and spawn a new agent."""
+    """Keyboard-driven spawn dialog. Tab between fields, enter to confirm."""
 
     DEFAULT_CSS = """
     SpawnDialog {
@@ -55,30 +54,34 @@ class SpawnDialog(ModalScreen[Optional[dict]]):
     SpawnDialog > Vertical {
         width: 70;
         height: auto;
-        max-height: 36;
         border: heavy $primary;
         background: $surface;
         padding: 1 2;
     }
-    SpawnDialog Label {
+    SpawnDialog .field-label {
         margin-top: 1;
         margin-bottom: 0;
+        color: $text-muted;
     }
     SpawnDialog Input {
         margin-bottom: 0;
     }
-    SpawnDialog DirectoryTree {
-        height: 12;
-        margin-bottom: 1;
-        border: round #808080;
+    SpawnDialog .hint {
+        color: $text-disabled;
+        height: 1;
     }
-    SpawnDialog .dialog-buttons {
-        height: 3;
-        align: center middle;
+    SpawnDialog .dir-hint {
+        color: $text-disabled;
+        height: auto;
+        max-height: 4;
+        margin: 0;
+        padding: 0 1;
+    }
+    SpawnDialog .footer-hint {
+        height: 1;
         margin-top: 1;
-    }
-    SpawnDialog Button {
-        margin: 0 1;
+        color: $text-muted;
+        text-align: center;
     }
     """
 
@@ -89,41 +92,109 @@ class SpawnDialog(ModalScreen[Optional[dict]]):
     def __init__(self, start_dir: str = "~") -> None:
         super().__init__()
         self._start_dir = str(Path(start_dir).expanduser())
-        self._selected_dir = self._start_dir
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("[bold]Spawn New Agent[/]")
-            yield Label("Name:")
+            yield Label("[bold]spawn agent[/]")
+            yield Label("name", classes="field-label")
             yield Input(placeholder="my-agent", id="agent-name")
-            yield Label("Command:")
-            yield Input(
-                placeholder="claude code --dangerously-skip-permissions",
-                value="claude",
-                id="agent-cmd",
-            )
-            yield Label(f"Directory: [dim]{self._selected_dir}[/]", id="dir-label")
-            yield DirectoryTree(self._start_dir, id="dir-tree")
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Spawn", variant="success", id="btn-spawn")
-                yield Button("Cancel", variant="default", id="btn-cancel")
+            yield Label("command", classes="field-label")
+            yield Input(value="claude", id="agent-cmd")
+            yield Label("directory  [dim]tab to complete[/]", classes="field-label")
+            yield Input(value=self._start_dir, id="agent-dir")
+            yield Static("", classes="dir-hint", id="dir-completions")
+            yield Label("[dim]enter[/] spawn  [dim]tab[/] complete/next  [dim]esc[/] cancel", classes="footer-hint")
 
-    def on_directory_tree_directory_selected(
-        self, event: DirectoryTree.DirectorySelected
-    ) -> None:
-        self._selected_dir = str(event.path)
-        label = self.query_one("#dir-label", Label)
-        label.update(f"Directory: [dim]{self._selected_dir}[/]")
+    def on_mount(self) -> None:
+        self.query_one("#agent-name", Input).focus()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-spawn":
-            name_input = self.query_one("#agent-name", Input)
-            cmd_input = self.query_one("#agent-cmd", Input)
-            name = name_input.value.strip() or "agent"
-            cmd = cmd_input.value.strip() or "claude"
-            self.dismiss({"name": name, "command": cmd, "dir": self._selected_dir})
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "agent-dir":
+            self._update_completions(event.value)
+
+    def _update_completions(self, partial: str) -> None:
+        """Show tab-completion hints for directory input."""
+        hint = self.query_one("#dir-completions", Static)
+        p = Path(partial).expanduser()
+
+        if p.is_dir():
+            try:
+                children = sorted(
+                    [d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")]
+                )[:6]
+                hint.update("  ".join(children) if children else "")
+            except PermissionError:
+                hint.update("[dim]permission denied[/]")
+        elif p.parent.is_dir():
+            prefix = p.name
+            try:
+                matches = sorted(
+                    [d.name for d in p.parent.iterdir()
+                     if d.is_dir() and d.name.startswith(prefix) and not d.name.startswith(".")]
+                )[:6]
+                hint.update("  ".join(matches) if matches else "")
+            except PermissionError:
+                hint.update("")
         else:
-            self.dismiss(None)
+            hint.update("")
+
+    def _tab_complete_dir(self) -> None:
+        """Tab-complete the directory input."""
+        dir_input = self.query_one("#agent-dir", Input)
+        p = Path(dir_input.value).expanduser()
+
+        if p.parent.is_dir() and not p.is_dir():
+            prefix = p.name
+            try:
+                matches = [
+                    d for d in p.parent.iterdir()
+                    if d.is_dir() and d.name.startswith(prefix) and not d.name.startswith(".")
+                ]
+                if len(matches) == 1:
+                    dir_input.value = str(matches[0])
+                    dir_input.cursor_position = len(dir_input.value)
+                    self._update_completions(dir_input.value)
+                    return
+            except PermissionError:
+                pass
+
+    def on_key(self, event: Key) -> None:
+        """Tab cycles fields; on dir field, tab completes first."""
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            focused = self.focused
+            fields = ["agent-name", "agent-cmd", "agent-dir"]
+            if isinstance(focused, Input) and focused.id in fields:
+                idx = fields.index(focused.id)
+                if focused.id == "agent-dir":
+                    # Try to complete first
+                    self._tab_complete_dir()
+                else:
+                    # Move to next field
+                    self.query_one(f"#{fields[idx + 1]}", Input).focus()
+            else:
+                self.query_one(f"#{fields[0]}", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Enter always submits
+        self._do_submit()
+
+    def _do_submit(self) -> None:
+        name = self.query_one("#agent-name", Input).value.strip() or "agent"
+        cmd = self.query_one("#agent-cmd", Input).value.strip() or "claude"
+        dir_val = self.query_one("#agent-dir", Input).value.strip()
+        directory = str(Path(dir_val).expanduser()) if dir_val else self._start_dir
+
+        if not Path(directory).is_dir():
+            self.notify(f"Not a directory: {directory}", severity="error")
+            self.query_one("#agent-dir", Input).focus()
+            return
+
+        self.dismiss({"name": name, "command": cmd, "dir": directory})
+
+    def action_submit(self) -> None:
+        self._do_submit()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -142,7 +213,6 @@ class ConfirmDeleteDialog(ModalScreen[bool]):
     ConfirmDeleteDialog > Vertical {
         width: 45;
         height: auto;
-        border: heavy $error;
         background: $surface;
         padding: 1 2;
     }
@@ -170,7 +240,7 @@ class ConfirmDeleteDialog(ModalScreen[bool]):
         with Vertical():
             yield Label(f"Delete [bold]{self._agent_name}[/]?")
             with Horizontal(classes="dialog-buttons"):
-                yield Button("Yes (y)", variant="error", id="btn-yes")
+                yield Button("Yes (y)", variant="default", id="btn-yes")
                 yield Button("No (n)", variant="default", id="btn-no")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -280,6 +350,13 @@ class OrcApp(App):
         self._sync_selection()
 
     def on_key(self, event: Key) -> None:
+        # Don't intercept keys when a modal/overlay/input is active
+        if len(self.screen_stack) > 1:
+            return
+        focused = self.focused
+        if focused is not None and not isinstance(focused, (AgentPane, EmptySlot)):
+            return
+
         key = event.key
         nav_map = {
             "h": "left", "left": "left",

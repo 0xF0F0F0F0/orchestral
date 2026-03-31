@@ -1,14 +1,16 @@
 # orchestral
 
-TUI for managing and observing multiple AI coding agents running across different repositories.
+TUI for managing and observing multiple AI coding agents running across different repositories or worktrees.
 
 Built with Python/Textual, uses tmux as the backend to manage agent sessions.
+
+![image](screen3.png)
 
 ## features
 
 - **overview grid** — see up to 6 agents at once with live output snippets
-- **status borders** — blue when agent needs input, grey when running, green when done
-- **vim navigation** — hjkl to move between panes, enter to open, d to delete
+- **status borders** — theme specific colors when agent needs input, when running or when done
+- **vim navigation** — hjkl to move between panes, enter to open (attach), d to delete
 - **tmux attach** — drop into any agent's full terminal, detach back with ctrl-b d
 - **theme support** — ships with 20+ themes (tokyo-night, dracula, catppuccin, etc.), persisted across sessions
 - **auto-detect** — picks up repo name, git branch, and working directory from each agent
@@ -18,7 +20,7 @@ Built with Python/Textual, uses tmux as the backend to manage agent sessions.
 
 | key | action |
 |-----|--------|
-| h/j/k/l | navigate panes |
+| h/j/k/l/arrows | navigate panes |
 | enter | open selected agent (tmux attach) |
 | n | spawn new agent |
 | d | delete selected agent |
