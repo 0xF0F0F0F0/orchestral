@@ -16,7 +16,7 @@ _BOX_CHARS = set("─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓�
 
 
 def _is_decoration_line(line: str) -> bool:
-    """Check if a line is mostly box-drawing / decorative characters."""
+    """Check if a line is purely box-drawing / decorative characters."""
     stripped = line.strip()
     if not stripped:
         return True
@@ -24,7 +24,9 @@ def _is_decoration_line(line: str) -> bool:
     if not non_space:
         return True
     box_count = sum(1 for c in non_space if c in _BOX_CHARS)
-    return box_count / len(non_space) > 0.5
+    # Only strip lines that are almost entirely decoration (>80%)
+    # to avoid eating legitimate output from non-Claude-Code tools
+    return box_count / len(non_space) > 0.8
 
 
 def _clean_line(line: str) -> str:
@@ -90,12 +92,12 @@ def _colorize(line: str, c: dict) -> str:
     """Apply Rich markup based on content patterns, using theme colors."""
     low = line.lower()
 
-    # User prompts (❯ or > at start)
-    if line.lstrip().startswith(("❯", ">", "❯")):
+    # User prompts (❯ or > at start, $ prompt)
+    if line.lstrip().startswith(("❯", ">", "❯", "$")):
         return f"[bold {c['secondary']}]{_escape(line)}[/]"
 
     # Errors
-    if any(w in low for w in ("error", "failed", "traceback", "exception")):
+    if any(w in low for w in ("error", "failed", "traceback", "exception", "fatal")):
         return f"[bold {c['error']}]{_escape(line)}[/]"
 
     # Warnings
@@ -103,23 +105,32 @@ def _colorize(line: str, c: dict) -> str:
         return f"[{c['warning']}]{_escape(line)}[/]"
 
     # Success / completion
-    if any(w in low for w in ("success", "completed", "done", "passed", "✓", "✔")):
+    if any(w in low for w in ("success", "completed", "done", "passed", "✓", "✔", "approved")):
         return f"[{c['success']}]{_escape(line)}[/]"
 
-    # File operations (Read, Write, Edit, Bash)
+    # Tool calls — Claude Code style
     if any(w in line for w in ("Read(", "Write(", "Edit(", "Bash(", "Glob(", "Grep(")):
         return f"[bold {c['primary']}]{_escape(line)}[/]"
 
-    # Tool/action names
+    # Tool calls — Codex style (function_call, tool output markers)
+    if any(w in line for w in ("function_call", "tool_output", ">>> ", "codex ", "Codex ")):
+        return f"[bold {c['primary']}]{_escape(line)}[/]"
+
+    # File operations (generic)
     if any(w in line for w in ("Read ", "Write ", "Edit ", "Bash ", "created", "modified", "updated")):
         return f"[{c['accent']}]{_escape(line)}[/]"
 
-    # Permission prompts
-    if any(w in line for w in ("Allow", "approve", "Enter to confirm", "Yes, I trust")):
+    # File paths (common in tool output)
+    if re.match(r"^\s*[/~][\w/.\-]+", line):
+        return f"[{c['accent']}]{_escape(line)}[/]"
+
+    # Permission / confirmation prompts (generic)
+    if any(w in line for w in ("Allow", "approve", "Enter to confirm", "Yes, I trust",
+                                "confirm", "Confirm", "accept", "Accept")):
         return f"[bold {c['secondary']}]{_escape(line)}[/]"
 
     # Dimmed noise
-    if any(w in low for w in ("? for shortcuts", "ctrl+", "press enter")):
+    if any(w in low for w in ("? for shortcuts", "ctrl+", "press enter", "loading", "thinking")):
         return f"[{c['panel']}]{_escape(line)}[/]"
 
     # Default
@@ -187,6 +198,11 @@ NEEDS_HUMAN_PATTERNS = [
     "wants to write",
     "wants to edit",
     "? for shortcuts",  # idle at prompt, waiting for user input
+    # Codex specific
+    "approve",
+    "Approve",
+    "sandbox",
+    "confirm execution",
     # Generic
     "Allow ",
     "Approve?",
@@ -197,10 +213,13 @@ NEEDS_HUMAN_PATTERNS = [
     "Continue?",
     "Proceed?",
     "Yes / No",
+    "accept",
+    "Accept",
+    "(yes/no)",
 ]
 
-# Regex: idle prompt line — just ❯ (possibly with spaces) and nothing else
-_IDLE_PROMPT_RE = re.compile(r"^\s*❯\s*$")
+# Regex: idle prompt line — just ❯ or $ (possibly with spaces) and nothing else
+_IDLE_PROMPT_RE = re.compile(r"^\s*[❯$>]\s*$")
 
 # Completion patterns
 COMPLETION_PATTERNS = [

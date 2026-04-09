@@ -26,6 +26,7 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import (
+    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -44,16 +45,23 @@ import subprocess as _subprocess
 # ── Spawn Dialog ────────────────────────────────────────────────
 
 
+class _FilteredTree(DirectoryTree):
+    """DirectoryTree that hides dotfiles/dirs."""
+
+    def filter_paths(self, paths):
+        return [p for p in paths if not p.name.startswith(".")]
+
+
 class SpawnDialog(ModalScreen[Optional[dict]]):
-    """Keyboard-driven spawn dialog. Tab between fields, enter to confirm."""
+    """Spawn dialog with neotree-style directory browser."""
 
     DEFAULT_CSS = """
     SpawnDialog {
         align: center middle;
     }
     SpawnDialog > Vertical {
-        width: 70;
-        height: auto;
+        width: 80;
+        height: 30;
         border: heavy $primary;
         background: $surface;
         padding: 1 2;
@@ -66,27 +74,25 @@ class SpawnDialog(ModalScreen[Optional[dict]]):
     SpawnDialog Input {
         margin-bottom: 0;
     }
-    SpawnDialog .hint {
-        color: $text-disabled;
+    SpawnDialog #selected-path {
         height: 1;
-    }
-    SpawnDialog .dir-hint {
-        color: $text-disabled;
-        height: auto;
-        max-height: 4;
-        margin: 0;
+        color: $text;
+        margin-top: 0;
         padding: 0 1;
     }
-    SpawnDialog .footer-hint {
-        height: 1;
+    SpawnDialog .dialog-buttons {
+        height: 3;
+        align: center middle;
         margin-top: 1;
-        color: $text-muted;
-        text-align: center;
+    }
+    SpawnDialog .dialog-buttons Button {
+        margin: 0 1;
     }
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "submit", "Spawn", show=False),
     ]
 
     def __init__(self, start_dir: str = "~") -> None:
@@ -100,95 +106,50 @@ class SpawnDialog(ModalScreen[Optional[dict]]):
             yield Input(placeholder="my-agent", id="agent-name")
             yield Label("command", classes="field-label")
             yield Input(value="claude", id="agent-cmd")
-            yield Label("directory  [dim]tab to complete[/]", classes="field-label")
-            yield Input(value=self._start_dir, id="agent-dir")
-            yield Static("", classes="dir-hint", id="dir-completions")
-            yield Label("[dim]enter[/] spawn  [dim]tab[/] complete/next  [dim]esc[/] cancel", classes="footer-hint")
+            yield Label("directory", classes="field-label")
+            yield _FilteredTree(self._start_dir, id="dir-tree")
+            yield Static(f"[bold]{self._start_dir}[/]", id="selected-path")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Spawn (ctrl+s)", variant="primary", id="btn-spawn")
+                yield Button("Cancel (esc)", variant="default", id="btn-cancel")
 
     def on_mount(self) -> None:
         self.query_one("#agent-name", Input).focus()
+        self._selected_dir = self._start_dir
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "agent-dir":
-            self._update_completions(event.value)
+    def on_directory_tree_directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
+        """User selected a directory in the tree."""
+        self._selected_dir = str(event.path)
+        self.query_one("#selected-path", Static).update(f"[bold]{self._selected_dir}[/]")
 
-    def _update_completions(self, partial: str) -> None:
-        """Show tab-completion hints for directory input."""
-        hint = self.query_one("#dir-completions", Static)
-        p = Path(partial).expanduser()
-
-        if p.is_dir():
-            try:
-                children = sorted(
-                    [d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")]
-                )[:6]
-                hint.update("  ".join(children) if children else "")
-            except PermissionError:
-                hint.update("[dim]permission denied[/]")
-        elif p.parent.is_dir():
-            prefix = p.name
-            try:
-                matches = sorted(
-                    [d.name for d in p.parent.iterdir()
-                     if d.is_dir() and d.name.startswith(prefix) and not d.name.startswith(".")]
-                )[:6]
-                hint.update("  ".join(matches) if matches else "")
-            except PermissionError:
-                hint.update("")
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-spawn":
+            self._do_submit()
         else:
-            hint.update("")
-
-    def _tab_complete_dir(self) -> None:
-        """Tab-complete the directory input."""
-        dir_input = self.query_one("#agent-dir", Input)
-        p = Path(dir_input.value).expanduser()
-
-        if p.parent.is_dir() and not p.is_dir():
-            prefix = p.name
-            try:
-                matches = [
-                    d for d in p.parent.iterdir()
-                    if d.is_dir() and d.name.startswith(prefix) and not d.name.startswith(".")
-                ]
-                if len(matches) == 1:
-                    dir_input.value = str(matches[0])
-                    dir_input.cursor_position = len(dir_input.value)
-                    self._update_completions(dir_input.value)
-                    return
-            except PermissionError:
-                pass
+            self.dismiss(None)
 
     def on_key(self, event: Key) -> None:
-        """Tab cycles fields; on dir field, tab completes first."""
         if event.key == "tab":
             event.prevent_default()
             event.stop()
             focused = self.focused
-            fields = ["agent-name", "agent-cmd", "agent-dir"]
-            if isinstance(focused, Input) and focused.id in fields:
-                idx = fields.index(focused.id)
-                if focused.id == "agent-dir":
-                    # Try to complete first
-                    self._tab_complete_dir()
-                else:
-                    # Move to next field
-                    self.query_one(f"#{fields[idx + 1]}", Input).focus()
+            cycle = ["agent-name", "agent-cmd", "dir-tree", "btn-spawn"]
+            if focused is not None and hasattr(focused, "id") and focused.id in cycle:
+                idx = (cycle.index(focused.id) + 1) % len(cycle)
+                self.query_one(f"#{cycle[idx]}").focus()
             else:
-                self.query_one(f"#{fields[0]}", Input).focus()
+                self.query_one("#agent-name", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Enter always submits
         self._do_submit()
 
     def _do_submit(self) -> None:
         name = self.query_one("#agent-name", Input).value.strip() or "agent"
         cmd = self.query_one("#agent-cmd", Input).value.strip() or "claude"
-        dir_val = self.query_one("#agent-dir", Input).value.strip()
-        directory = str(Path(dir_val).expanduser()) if dir_val else self._start_dir
+        directory = self._selected_dir
 
         if not Path(directory).is_dir():
             self.notify(f"Not a directory: {directory}", severity="error")
-            self.query_one("#agent-dir", Input).focus()
             return
 
         self.dismiss({"name": name, "command": cmd, "dir": directory})
@@ -488,11 +449,33 @@ class OrcApp(App):
         self._do_attach(message.agent_id)
 
     def _do_attach(self, agent_id: str) -> None:
-        from .tmux import session_name
+        from .tmux import session_name, session_exists
+        import os
+        import sys
 
         name = session_name(agent_id)
-        with self.suspend():
-            _subprocess.run(["tmux", "attach-session", "-t", name])
+
+        if not session_exists(agent_id):
+            self.notify("Session no longer exists", severity="warning")
+            return
+
+        try:
+            with self.suspend():
+                # Use os.system for cleaner terminal handoff — subprocess.run
+                # can leave terminal state inconsistent on some emulators
+                # (notably Ghostty) when the child process (tmux attach)
+                # manipulates the terminal directly.
+                os.system(f"tmux attach-session -t {name}")
+                # Reset terminal state after detach — some emulators don't
+                # restore properly after tmux releases the tty
+                os.system("stty sane 2>/dev/null")
+        except Exception:
+            # If suspend/resume fails, try to recover gracefully
+            try:
+                os.system("stty sane 2>/dev/null")
+            except Exception:
+                pass
+
         self.call_after_refresh(self._sync_selection)
 
     def action_refresh(self) -> None:
